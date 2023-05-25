@@ -3,7 +3,7 @@
  * @Author       : zhiwei chen
  * @Date         : 2023-05-20 21:31:17
  * @LastEditors  : zhiwei chen
- * @LastEditTime : 2023-05-21 20:12:27
+ * @LastEditTime : 2023-05-25 08:39:30
 -->
 # 自动驾驶中的SLAM技术第一课作业
 
@@ -43,3 +43,11 @@
 <img src="GN-update.jpeg">
 2. Levenberg-Marquardt算法：
 <img src="LM-update.jpeg">
+
+## 1.1 错题更新
+1. 第一题右扰动推导错误，更正后推导如下
+<img src="1.1-1.jpg">
+
+2. 第二题左扰动虽然推导和助教提示中不一样，但是我单独询问了陈梓杰助教，虽然是以左雅克比推导的，但是推导流程没有错
+按照右雅克比推导流程如下
+<img src="1.1-2.jpg">
