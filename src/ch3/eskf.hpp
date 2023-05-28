@@ -5,6 +5,10 @@
 #ifndef SLAM_IN_AUTO_DRIVING_ESKF_HPP
 #define SLAM_IN_AUTO_DRIVING_ESKF_HPP
 
+#include <iomanip>
+
+#include <glog/logging.h>
+
 #include "common/eigen_types.h"
 #include "common/gnss.h"
 #include "common/imu.h"
@@ -12,10 +16,11 @@
 #include "common/nav_state.h"
 #include "common/odom.h"
 
-#include <glog/logging.h>
-#include <iomanip>
+DECLARE_bool(with_F_update_error_state);
+DECLARE_bool(with_left_perturbation);
 
-namespace sad {
+namespace sad
+{
 
 /**
  * 书本第3章介绍的误差卡尔曼滤波器
@@ -26,8 +31,9 @@ namespace sad {
  * @tparam S    状态变量的精度，取float或double
  */
 template <typename S = double>
-class ESKF {
-   public:
+class ESKF
+{
+  public:
     /// 类型定义
     using SO3 = Sophus::SO3<S>;                     // 旋转变量类型
     using VecT = Eigen::Matrix<S, 3, 1>;            // 向量类型
@@ -39,7 +45,8 @@ class ESKF {
     using Mat18T = Eigen::Matrix<S, 18, 18>;        // 18维方差类型
     using NavStateT = NavState<S>;                  // 整体名义状态变量类型
 
-    struct Options {
+    struct Options
+    {
         Options() = default;
 
         /// IMU 测量与零偏参数
@@ -69,7 +76,8 @@ class ESKF {
     /**
      * 初始零偏取零
      */
-    ESKF(Options option = Options()) : options_(option) { BuildNoise(option); }
+    ESKF(Options option = Options())
+        : options_(option) { BuildNoise(option); }
 
     /**
      * 设置初始条件
@@ -79,7 +87,8 @@ class ESKF {
      * @param gravity 重力
      */
     void SetInitialConditions(Options options, const VecT& init_bg, const VecT& init_ba,
-                              const VecT& gravity = VecT(0, 0, -9.8)) {
+                              const VecT& gravity = VecT(0, 0, -9.8))
+    {
         BuildNoise(options);
         options_ = options;
         bg_ = init_bg;
@@ -114,7 +123,8 @@ class ESKF {
     SE3 GetNominalSE3() const { return SE3(R_, p_); }
 
     /// 设置状态X
-    void SetX(const NavStated& x, const Vec3d& grav) {
+    void SetX(const NavStated& x, const Vec3d& grav)
+    {
         current_time_ = x.timestamp_;
         R_ = x.R_;
         p_ = x.p_;
@@ -130,8 +140,9 @@ class ESKF {
     /// 获取重力
     Vec3d GetGravity() const { return g_; }
 
-   private:
-    void BuildNoise(const Options& options) {
+  private:
+    void BuildNoise(const Options& options)
+    {
         double ev = options.acce_var_;
         double et = options.gyro_var_;
         double eg = options.bias_gyro_var_;
@@ -157,16 +168,23 @@ class ESKF {
     }
 
     /// 更新名义状态变量，重置error state
-    void UpdateAndReset() {
+    void UpdateAndReset()
+    {
+        // TAG Problem3 左扰动更新
         p_ += dx_.template block<3, 1>(0, 0);
         v_ += dx_.template block<3, 1>(3, 0);
-        R_ = R_ * SO3::exp(dx_.template block<3, 1>(6, 0));
+        if (FLAGS_with_left_perturbation)
+            R_ = SO3::exp(dx_.template block<3, 1>(6, 0)) * R_;
+        else
+            R_ = R_ * SO3::exp(dx_.template block<3, 1>(6, 0));
 
-        if (options_.update_bias_gyro_) {
+        if (options_.update_bias_gyro_)
+        {
             bg_ += dx_.template block<3, 1>(9, 0);
         }
 
-        if (options_.update_bias_acce_) {
+        if (options_.update_bias_acce_)
+        {
             ba_ += dx_.template block<3, 1>(12, 0);
         }
 
@@ -177,9 +195,14 @@ class ESKF {
     }
 
     /// 对P阵进行投影，参考式(3.63)
-    void ProjectCov() {
+    void ProjectCov()
+    {
         Mat18T J = Mat18T::Identity();
-        J.template block<3, 3>(6, 6) = Mat3T::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
+        // TAG Problem3 左扰动更新
+        if (FLAGS_with_left_perturbation)
+            J.template block<3, 3>(6, 6) = Mat3T::Identity() + 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
+        else
+            J.template block<3, 3>(6, 6) = Mat3T::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
         cov_ = J * cov_ * J.transpose();
     }
 
@@ -216,11 +239,13 @@ using ESKFD = ESKF<double>;
 using ESKFF = ESKF<float>;
 
 template <typename S>
-bool ESKF<S>::Predict(const IMU& imu) {
+bool ESKF<S>::Predict(const IMU& imu)
+{
     assert(imu.timestamp_ >= current_time_);
 
     double dt = imu.timestamp_ - current_time_;
-    if (dt > (5 * options_.imu_dt_) || dt < 0) {
+    if (dt > (5 * options_.imu_dt_) || dt < 0)
+    {
         // 时间间隔不对，可能是第一个IMU数据，没有历史信息
         LOG(INFO) << "skip this imu because dt_ = " << dt;
         current_time_ = imu.timestamp_;
@@ -237,26 +262,79 @@ bool ESKF<S>::Predict(const IMU& imu) {
     p_ = new_p;
     // 其余状态维度不变
 
+    // TAG Problem3 左扰动更新
     // error state 递推
     // 计算运动过程雅可比矩阵 F，见(3.47)
     // F实际上是稀疏矩阵，也可以不用矩阵形式进行相乘而是写成散装形式，这里为了教学方便，使用矩阵形式
-    Mat18T F = Mat18T::Identity();                                                 // 主对角线
-    F.template block<3, 3>(0, 3) = Mat3T::Identity() * dt;                         // p 对 v
-    F.template block<3, 3>(3, 6) = -R_.matrix() * SO3::hat(imu.acce_ - ba_) * dt;  // v对theta
-    F.template block<3, 3>(3, 12) = -R_.matrix() * dt;                             // v 对 ba
-    F.template block<3, 3>(3, 15) = Mat3T::Identity() * dt;                        // v 对 g
-    F.template block<3, 3>(6, 6) = SO3::exp(-(imu.gyro_ - bg_) * dt).matrix();     // theta 对 theta
-    F.template block<3, 3>(6, 9) = -Mat3T::Identity() * dt;                        // theta 对 bg
+    Mat18T F = Mat18T::Identity();                          // 主对角线
+    F.template block<3, 3>(0, 3) = Mat3T::Identity() * dt;  // p 对 v
+
+    if (FLAGS_with_left_perturbation)
+        F.template block<3, 3>(3, 6) = -SO3::hat(R_.matrix() * (imu.acce_ - ba_)) * dt;  // v对theta
+    else
+        F.template block<3, 3>(3, 6) = -R_.matrix() * SO3::hat(imu.acce_ - ba_) * dt;  // v对theta
+
+    F.template block<3, 3>(3, 12) = -R_.matrix() * dt;       // v 对 ba
+    F.template block<3, 3>(3, 15) = Mat3T::Identity() * dt;  // v 对 g
+
+    if (FLAGS_with_left_perturbation)
+        F.template block<3, 3>(6, 6) = Mat3T::Identity();  // theta 对 theta
+    else
+        F.template block<3, 3>(6, 6) = SO3::exp(-(imu.gyro_ - bg_) * dt).matrix();  // theta 对 theta
+
+    if (FLAGS_with_left_perturbation)
+        F.template block<3, 3>(6, 9) = -R_.matrix() * dt;
+    else
+        F.template block<3, 3>(6, 9) = -Mat3T::Identity() * dt;  // theta 对 bg
+
+    // TAG Problem2 拆开F矩阵来更新dx
+    auto dx_update = [&](Vec18T& dx)
+    {
+        VecT dp, dv, dR, dbg, dba, dg;
+        VecT dp_prep, dv_prep, dR_prep, dbg_prep, dba_prep, dg_prep;
+        dp = dx.template block<3, 1>(0, 0);
+        dv = dx.template block<3, 1>(3, 0);
+        dR = dx.template block<3, 1>(6, 0);
+        dbg = dx.template block<3, 1>(9, 0);
+        dba = dx.template block<3, 1>(12, 0);
+        dg = dx.template block<3, 1>(15, 0);
+
+        dp_prep = dp
+                  + Mat3T::Identity() * dt * dv;
+        dv_prep = dv
+                  - R_.matrix() * SO3::hat(imu.acce_ - ba_) * dt * dR
+                  - R_.matrix() * dt * dba
+                  + Mat3T::Identity() * dt * dg;
+        dR_prep = SO3::exp(-(imu.gyro_ - bg_) * dt).matrix() * dR
+                  - Mat3T::Identity() * dt * dbg;
+        dbg_prep = dbg;
+        dba_prep = dba;
+        dg_prep = dg;
+
+        dx.template block<3, 1>(0, 0) = dp_prep;
+        dx.template block<3, 1>(3, 0) = dv_prep;
+        dx.template block<3, 1>(6, 0) = dR_prep;
+        dx.template block<3, 1>(9, 0) = dbg_prep;
+        dx.template block<3, 1>(12, 0) = dba_prep;
+        dx.template block<3, 1>(15, 0) = dg_prep;
+    };
 
     // mean and cov prediction
-    dx_ = F * dx_;  // 这行其实没必要算，dx_在重置之后应该为零，因此这步可以跳过，但F需要参与Cov部分计算，所以保留
+    // ! 1. 以F矩阵更新
+    if (FLAGS_with_F_update_error_state)
+        dx_ = F * dx_;
+    // ! 2. 分别更新
+    else
+        dx_update(dx_);
     cov_ = F * cov_.eval() * F.transpose() + Q_;
     current_time_ = imu.timestamp_;
+
     return true;
 }
 
 template <typename S>
-bool ESKF<S>::ObserveWheelSpeed(const Odom& odom) {
+bool ESKF<S>::ObserveWheelSpeed(const Odom& odom)
+{
     assert(odom.timestamp_ >= current_time_);
     // odom 修正以及雅可比
     // 使用三维的轮速观测，H为3x18，大部分为零
@@ -285,11 +363,13 @@ bool ESKF<S>::ObserveWheelSpeed(const Odom& odom) {
 }
 
 template <typename S>
-bool ESKF<S>::ObserveGps(const GNSS& gnss) {
+bool ESKF<S>::ObserveGps(const GNSS& gnss)
+{
     /// GNSS 观测的修正
     assert(gnss.unix_time_ >= current_time_);
 
-    if (first_gnss_) {
+    if (first_gnss_)
+    {
         R_ = gnss.utm_pose_.so3();
         p_ = gnss.utm_pose_.translation();
         first_gnss_ = false;
@@ -305,7 +385,8 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
 }
 
 template <typename S>
-bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) {
+bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise)
+{
     /// 既有旋转，也有平移
     /// 观测状态变量中的p, R，H为6x18，其余为零
     Eigen::Matrix<S, 6, 18> H = Eigen::Matrix<S, 6, 18>::Zero();
@@ -319,10 +400,14 @@ bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     Mat6d V = noise_vec.asDiagonal();
     Eigen::Matrix<S, 18, 6> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + V).inverse();
 
+    // TAG Problem3 左扰动更新
     // 更新x和cov
     Vec6d innov = Vec6d::Zero();
-    innov.template head<3>() = (pose.translation() - p_);          // 平移部分
-    innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
+    innov.template head<3>() = (pose.translation() - p_);  // 平移部分
+    if (FLAGS_with_left_perturbation)
+        innov.template tail<3>() = (pose.so3() * R_.inverse()).log();  // 旋转部分(3.67)
+    else
+        innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
 
     dx_ = K * innov;
     cov_ = (Mat18T::Identity() - K * H) * cov_;

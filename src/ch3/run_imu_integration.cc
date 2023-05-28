@@ -1,3 +1,10 @@
+/*
+ * @Description  : 
+ * @Author       : zhiwei chen
+ * @Date         : 2023-05-26 15:56:40
+ * @LastEditors  : zhiwei chen
+ * @LastEditTime : 2023-05-26 15:56:40
+ */
 //
 // Created by xiang on 2021/11/5.
 //
@@ -54,6 +61,7 @@ int main(int argc, char** argv) {
         fout << std::endl;
     };
 
+    // 更新状态并返回状态量
     std::ofstream fout("./data/ch3/state.txt");
     io.SetIMUProcessFunc([&imu_integ, &save_result, &fout, &ui](const sad::IMU& imu) {
           imu_integ.AddIMU(imu);

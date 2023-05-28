@@ -1,3 +1,10 @@
+/*
+ * @Description  : 
+ * @Author       : zhiwei chen
+ * @Date         : 2023-05-26 15:20:07
+ * @LastEditors  : zhiwei chen
+ * @LastEditTime : 2023-05-26 15:20:07
+ */
 //
 // Created by xiang on 2021/11/5.
 //
@@ -20,6 +27,7 @@ class IMUIntegration {
         : gravity_(gravity), bg_(init_bg), ba_(init_ba) {}
 
     // 增加imu读数
+    // IMU 积分
     void AddIMU(const IMU& imu) {
         double dt = imu.timestamp_ - timestamp_;
         if (dt > 0 && dt < 0.1) {
