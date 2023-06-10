@@ -1,153 +1,105 @@
-//
-// Created by xiang on 23-1-19.
-//
+<!--
+ * @Description  : r
+ * @Author       : zhiwei chen
+ * @Date         : 2023-05-28 20:13:32
+ * @LastEditors  : zhiwei chen
+ * @LastEditTime : 2023-06-10 22:33:59
+-->
+# 自动驾驶中的SLAM技术第三课作业
 
-#include "ch4/g2o_types.h"
+## 1 推导等式（书中式4.48d）
+参考速度与旋转部分的推导  
+$$
+\begin{aligned}
+\boldsymbol{r}_{\Delta \boldsymbol{p}_{i j}}\left(\boldsymbol{R}_{i} \operatorname{Exp}\left(\delta \boldsymbol{\phi}_{i}\right)\right) & =\left(\boldsymbol{R}_{i} \operatorname{Exp}\left(\delta \boldsymbol{\phi}_{i}\right)\right)^{\top} (\boldsymbol{p}_{j}-\boldsymbol{p}_{i}-\boldsymbol{v}_{i} \Delta t_{i j}-\frac{1}{2} \boldsymbol{g} \Delta t_{i j}^{2}) -\Delta \tilde{\boldsymbol{p}}_{i j} \\
+& = (\boldsymbol{I}-\delta \boldsymbol{\phi}_{i}^{\wedge}) \bm R_i^ \top (\boldsymbol{p}_{j}-\boldsymbol{p}_{i}-\boldsymbol{v}_{i} \Delta t_{i j}-\frac{1}{2} \boldsymbol{g} \Delta t_{i j}^{2}) -\Delta \tilde{\boldsymbol{p}}_{i j} \\
+& = \bm R_i^ \top (\boldsymbol{p}_{j}-\boldsymbol{p}_{i}-\boldsymbol{v}_{i} \Delta t_{i j}-\frac{1}{2} \boldsymbol{g} \Delta t_{i j}^{2}) -\Delta \tilde{\boldsymbol{p}}_{i j} - \delta \boldsymbol{\phi}_{i}^{\wedge} \bm R_i^ \top (\boldsymbol{p}_{j}-\boldsymbol{p}_{i}-\boldsymbol{v}_{i} \Delta t_{i j}-\frac{1}{2} \boldsymbol{g} \Delta t_{i j}^{2}) \\
+& = \boldsymbol{r}_{\Delta \boldsymbol{p}_{i j}}\left(\boldsymbol{R}_{i} \right) + (\bm R_i^ \top (\boldsymbol{p}_{j}-\boldsymbol{p}_{i}-\boldsymbol{v}_{i} \Delta t_{i j}-\frac{1}{2} \boldsymbol{g} \Delta t_{i j}^{2}))^{\wedge}\delta \boldsymbol{\phi}_{i}
+\end{aligned}
+$$
+则其雅克比为
+$$
+\frac{\partial \boldsymbol{r}_{\Delta \boldsymbol{p}_{i j}}}{\partial \boldsymbol{\phi}_{i}}  =\left(\boldsymbol{R}_{i}^{\top}\left(\boldsymbol{p}_{j}-\boldsymbol{p}_{i}-\boldsymbol{v}_{i} \Delta t_{i j}-\frac{1}{2} \boldsymbol{g} \Delta t_{i j}^{2}\right)\right)^{\wedge} 
+$$
 
-#include "common/g2o_types.h"
+## 2 实现由Odom数据触发的图优化（g2o）
+思路：
+1. 为了防止Odom和GNSS连着进来的时候导致imu积分失败，增加上次数据的标识符号，表明上次数据类型
+```cpp
+    enum
+    {
+        imu_,
+        gnss_,
+        odom_
+    };
 
-namespace sad
-{
+    int last_data_sign_ = -1;
+```
+2. 根据数据的先后不同采用不同的优化方式，主要有以下4种   
+(1). 上一帧GNSS，当前帧GNSS：添加两个GNSS约束  
+(2). 上一帧GNSS，当前帧Odom：添加上一帧GNSS约束，一个速度约束  
+(3). 上一帧Odom，当前帧Odom：添加速度约束  
+(4). 上一帧Odom，当前帧GNSS：添加当前帧的GNSS约束，一个速度约束  
+注意: 与助教提示不同,这里并非只通过odom触发,而是gnss和odom均可触发优化,这样可以避免单一传感器长时间的无数据输入,同时通过减少约束的形式来避免对数据进行线性插值
+是否增加GNSS约束通过下面代码实现
+```cpp
+    if (last_data_sign_ == gnss_)
+    {
+        auto edge_gnss0 = new EdgeGNSS(v0_pose, last_gnss_.utm_pose_);
+        edge_gnss0->setInformation(options_.gnss_info_);
+        optimizer.addEdge(edge_gnss0);
+    }
 
-EdgeInertial::EdgeInertial(std::shared_ptr<IMUPreintegration> preinteg, const Vec3d& gravity, double weight)
-    : preint_(preinteg), dt_(preinteg->dt_)
-{
-    resize(6);  // 6个关联顶点
-    grav_ = gravity;
-    setInformation(preinteg->cov_.inverse() * weight);
-}
+    if (now_data_sign == gnss_)
+    {
+        auto edge_gnss1 = new EdgeGNSS(v1_pose, this_gnss_.utm_pose_);
+        edge_gnss1->setInformation(options_.gnss_info_);
+        optimizer.addEdge(edge_gnss1);
+    }
+```
+是否增加Odom约束通过下面代码实现
+```cpp
+        if (last_data_sign_ == odom_)
+        {
+            // velocity obs
+            double velo_l =
+                options_.wheel_radius_ * last_odom_.left_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+            double velo_r =
+                options_.wheel_radius_ * last_odom_.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+            double average_vel = 0.5 * (velo_l + velo_r);
+            vel_odom = Vec3d(average_vel, 0.0, 0.0);
+            vel_world = this_frame_->R_ * vel_odom;
 
-void EdgeInertial::computeError()
-{
-    auto* p1 = dynamic_cast<const VertexPose*>(_vertices[0]);
-    auto* v1 = dynamic_cast<const VertexVelocity*>(_vertices[1]);
-    auto* bg1 = dynamic_cast<const VertexGyroBias*>(_vertices[2]);
-    auto* ba1 = dynamic_cast<const VertexAccBias*>(_vertices[3]);
-    auto* p2 = dynamic_cast<const VertexPose*>(_vertices[4]);
-    auto* v2 = dynamic_cast<const VertexVelocity*>(_vertices[5]);
+            edge_odom = new EdgeEncoder3D(v0_vel, vel_world);
+            edge_odom->setInformation(options_.odom_info_);
+            optimizer.addEdge(edge_odom);
+        }
 
-    Vec3d bg = bg1->estimate();
-    Vec3d ba = ba1->estimate();
+        if (now_data_sign == odom_)
+        {
+            // velocity obs
+            double velo_l =
+                options_.wheel_radius_ * last_odom_.left_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+            double velo_r =
+                options_.wheel_radius_ * last_odom_.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
+            double average_vel = 0.5 * (velo_l + velo_r);
+            vel_odom = Vec3d(average_vel, 0.0, 0.0);
+            vel_world = this_frame_->R_ * vel_odom;
 
-    const SO3 dR = preint_->GetDeltaRotation(bg);
-    const Vec3d dv = preint_->GetDeltaVelocity(bg, ba);
-    const Vec3d dp = preint_->GetDeltaPosition(bg, ba);
+            edge_odom = new EdgeEncoder3D(v1_vel, vel_world);
+            edge_odom->setInformation(options_.odom_info_);
+            optimizer.addEdge(edge_odom);
+        }
+```
 
-    /// 预积分误差项（4.41）
-    const Vec3d er = (dR.inverse() * p1->estimate().so3().inverse() * p2->estimate().so3()).log();
-    Mat3d RiT = p1->estimate().so3().inverse().matrix();
-    const Vec3d ev = RiT * (v2->estimate() - v1->estimate() - grav_ * dt_) - dv;
-    const Vec3d ep = RiT * (p2->estimate().translation() - p1->estimate().translation() - v1->estimate() * dt_ - grav_ * dt_ * dt_ / 2) - dp;
-    _error << er, ev, ep;
-}
+结果如下图所示  
+<img src="3-1.png">
+可以看出对比只在GNSS进行优化的情况轨迹少了突变
 
-void EdgeInertial::linearizeOplus()
-{
-    auto* p1 = dynamic_cast<const VertexPose*>(_vertices[0]);
-    auto* v1 = dynamic_cast<const VertexVelocity*>(_vertices[1]);
-    auto* bg1 = dynamic_cast<const VertexGyroBias*>(_vertices[2]);
-    auto* ba1 = dynamic_cast<const VertexAccBias*>(_vertices[3]);
-    auto* p2 = dynamic_cast<const VertexPose*>(_vertices[4]);
-    auto* v2 = dynamic_cast<const VertexVelocity*>(_vertices[5]);
-
-    Vec3d bg = bg1->estimate();
-    Vec3d ba = ba1->estimate();
-    Vec3d dbg = bg - preint_->bg_;
-
-    // 一些中间符号
-    const SO3 R1 = p1->estimate().so3();
-    const SO3 R1T = R1.inverse();
-    const SO3 R2 = p2->estimate().so3();
-
-    auto dR_dbg = preint_->dR_dbg_;
-    auto dv_dbg = preint_->dV_dbg_;
-    auto dp_dbg = preint_->dP_dbg_;
-    auto dv_dba = preint_->dV_dba_;
-    auto dp_dba = preint_->dP_dba_;
-
-    // 估计值
-    Vec3d vi = v1->estimate();
-    Vec3d vj = v2->estimate();
-    Vec3d pi = p1->estimate().translation();
-    Vec3d pj = p2->estimate().translation();
-
-    const SO3 dR = preint_->GetDeltaRotation(bg);
-    const SO3 eR = SO3(dR).inverse() * R1T * R2;
-    const Vec3d er = eR.log();
-    const Mat3d invJr = SO3::jr_inv(eR);
-    Mat3d RiT = p1->estimate().so3().inverse().matrix();
-    const Vec3d dv = preint_->GetDeltaVelocity(bg, ba);
-    const Vec3d dp = preint_->GetDeltaPosition(bg, ba);
-
-    /// 雅可比矩阵
-    /// 注意有3个index, 顶点的，自己误差的，顶点内部变量的
-    /// 变量顺序：pose1(R1,p1), v1, bg1, ba1, pose2(R2,p2), v2
-    /// 残差顺序：eR, ev, ep，残差顺序为行，变量顺序为列
-
-    //       | R1 | p1 | v1 | bg1 | ba1 | R2 | p2 | v2 |
-    //  vert | 0       | 1  | 2   | 3   | 4       | 5  |
-    //  col  | 0    3  | 0  | 0   | 0   | 0    3  | 0  |
-    //    row
-    //  eR 0 |
-    //  ev 3 |
-    //  ep 6 |
-
-    /// 残差对R1, 9x3
-    _jacobianOplus[0].setZero();
-    // dR/dR1, 4.42
-    _jacobianOplus[0].block<3, 3>(0, 0) = -invJr * (R2.inverse() * R1).matrix();
-    // dv/dR1, 4.47
-    _jacobianOplus[0].block<3, 3>(3, 0) = SO3::hat(R1T * (vj - vi - grav_ * dt_));
-    // dp/dR1, 4.48d
-    _jacobianOplus[0].block<3, 3>(6, 0) = SO3::hat(R1T * (pj - pi - v1->estimate() * dt_ - 0.5 * grav_ * dt_ * dt_));
-
-    /// 残差对p1, 9x3
-    // dp/dp1, 4.48a
-    _jacobianOplus[0].block<3, 3>(6, 3) = -R1T.matrix();
-
-    /// 残差对v1, 9x3
-    _jacobianOplus[1].setZero();
-    // dv/dv1, 4.46a
-    _jacobianOplus[1].block<3, 3>(3, 0) = -R1T.matrix();
-    // dp/dv1, 4.48c
-    _jacobianOplus[1].block<3, 3>(6, 0) = -R1T.matrix() * dt_;
-
-    /// 残差对bg1
-    _jacobianOplus[2].setZero();
-    // dR/dbg1, 4.45
-    _jacobianOplus[2].block<3, 3>(0, 0) = -invJr * eR.inverse().matrix() * SO3::jr((dR_dbg * dbg).eval()) * dR_dbg;
-    // dv/dbg1
-    _jacobianOplus[2].block<3, 3>(3, 0) = -dv_dbg;
-    // dp/dbg1
-    _jacobianOplus[2].block<3, 3>(6, 0) = -dp_dbg;
-
-    /// 残差对ba1
-    _jacobianOplus[3].setZero();
-    // dv/dba1
-    _jacobianOplus[3].block<3, 3>(3, 0) = -dv_dba;
-    // dp/dba1
-    _jacobianOplus[3].block<3, 3>(6, 0) = -dp_dba;
-
-    /// 残差对pose2
-    _jacobianOplus[4].setZero();
-    // dr/dr2, 4.43
-    _jacobianOplus[4].block<3, 3>(0, 0) = invJr;
-    // dp/dp2, 4.48b
-    _jacobianOplus[4].block<3, 3>(6, 3) = R1T.matrix();
-
-    /// 残差对v2
-    _jacobianOplus[5].setZero();
-    // dv/dv2, 4,46b
-    _jacobianOplus[5].block<3, 3>(3, 0) = R1T.matrix();  // OK
-
-    Eigen::Matrix<double, 9, 24> J;
-    J.block<9, 6>(0, 0) = _jacobianOplus[0];
-    J.block<9, 3>(0, 6) = _jacobianOplus[1];
-    J.block<9, 3>(0, 9) = _jacobianOplus[2];
-    J.block<9, 3>(0, 12) = _jacobianOplus[3];
-    J.block<9, 6>(0, 15) = _jacobianOplus[4];
-    J.block<9, 3>(0, 21) = _jacobianOplus[5];
-
+## 3 利用数值求导工具，验证本书实验中的雅可比矩阵的正确性
+思路:
+使用中心差分进行数值求导数,代码如下
+```cpp
     const double eps = 1e-6;
     /// 残差对R1, 9x3
     // dR/dR1, 4.42
@@ -620,26 +572,171 @@ void EdgeInertial::linearizeOplus()
                   << std::endl;
     };
 
-    // dR_dR1_error_J();
-    // dv_dR1_error_J();
-    // dp_dR1_error_J();
+    LOG(INFO)<< "begin";
+    dR_dR1_error_J();
+    dv_dR1_error_J();
+    dp_dR1_error_J();
 
-    // dp_dp1_error_J();
+    dp_dp1_error_J();
 
-    // dv_dv1_error_J();
-    // dp_dv1_error_J();
+    dv_dv1_error_J();
+    dp_dv1_error_J();
 
-    // dR_dbg1_error_J();
-    // dv_dbg1_error_J();
-    // dp_dbg1_error_J();
+    dR_dbg1_error_J();
+    dv_dbg1_error_J();
+    dp_dbg1_error_J();
 
-    // dv_dba1_error_J();
-    // dp_dba1_error_J();
+    dv_dba1_error_J();
+    dp_dba1_error_J();
 
-    // dR_dR2_error_J();
-    // dp_dp2_error_J();
+    dR_dR2_error_J();
+    dp_dp2_error_J();
 
-    // dv_dv2_error_J();
-}
+    dv_dv2_error_J();
+    LOG(INFO)<< "end";
+```
 
-}  // namespace sad
+结果如下所示  
+通过数值计算的雅可比中有一些小于e-10的量,可以等同于0,可以看出,两种方式计算的雅可比相等  
+Ps. 测试的时候如果同时输出所有的信息,会存在打印错乱的情况,故测试仅按照一一对照测试
+```
+dR/dR1: 
+Analytical Jacobian is
+00-0.999986 00.00446288 -0.00295614
+-0.00447727 00-0.999978 000.0048764
+00.00293432 -0.00488957 00-0.999984
+Numerical Jacobian is
+00-0.999986 00.00446288 -0.00295614
+-0.00447727 00-0.999978 000.0048764
+00.00293432 -0.00488957 00-0.999984
+
+dv/dR1: 
+Analytical Jacobian is
+000000000 00-3.0034 000.02177
+0003.0034 000000000 -0.082469
+0-0.02177 00.082469 000000000
+Numerical Jacobian is
+-6.93889e-12 00000-3.0034 000000000000
+0000003.0034 0-1.9082e-11 000000000000
+0000-0.02177 00000.082469 00000.166667
+
+dp/dR1: 
+Analytical Jacobian is
+00000000000 00-0.457586 00.00446029
+0000.457586 00000000000 -0.00656202
+-0.00446029 00.00656202 00000000000
+Numerical Jacobian is
+-8.67362e-13 000-0.457586 000.00446029
+00000.457586 -1.30104e-12 0-0.00656202
+0-0.00446029 000.00656202 000000000000
+
+dp/dp1: 
+Analytical Jacobian is
+0000.274282 00-0.961646 00.00239719
+0000.961646 0000.274274 -0.00344076
+-0.00265131 -0.00324898 00-0.999991
+Numerical Jacobian is
+0000.274282 00-0.961646 00.00239719
+0000.961646 0000.274274 -0.00344076
+-0.00265131 -0.00324898 00-0.999991
+
+dv/dv1: 
+Analytical Jacobian is
+0000.274282 00-0.961646 00.00239719
+0000.961646 0000.274274 -0.00344076
+-0.00265131 -0.00324898 00-0.999991
+Numerical Jacobian is
+0000.274282 00-0.961646 00.00239719
+0000.961646 0000.274274 -0.00344076
+0-0.0026513 -0.00324898 00-0.999991
+
+dp/dv1: 
+Analytical Jacobian is
+00000.083181 000-0.291636 00.000726989
+00000.291636 0000.0831783 0-0.00104347
+-0.000804055 -0.000985311 000-0.303265
+Numerical Jacobian is
+00000.083181 000-0.291636 00.000726989
+00000.291636 0000.0831783 0-0.00104347
+-0.000804055 -0.000985311 000-0.303265
+
+dR/dbg1: 
+Analytical Jacobian is
+00000.303266 -0.000698732 00.000704828
+00.000700248 00000.303266 -0.000491347
+-0.000703267 00.000493381 00000.303266
+Numerical Jacobian is
+00000.303266 -0.000698732 00.000704828
+00.000700248 00000.303266 -0.000491347
+-0.000703267 00.000493381 00000.303266
+
+dv/dbg1: 
+Analytical Jacobian is
+-0.000649963 00000.438349 -0.000915145
+000-0.438344 -0.000697355 0000.0179824
+000.00207552 00-0.0180217 0-5.1881e-05
+Numerical Jacobian is
+-0.000649963 00000.438349 -0.000915145
+000-0.438344 -0.000697355 0000.0179824
+000.00207552 00-0.0180217 -5.18809e-05
+
+dp/dbg1: 
+Analytical Jacobian is
+-5.51969e-05 0000.0435329 000.00026791
+00-0.0435339 -5.86461e-05 000.00145122
+-0.000169164 00-0.0014683 -3.93699e-06
+Numerical Jacobian is
+-5.51969e-05 0000.0435329 000.00026791
+00-0.0435339 -5.86461e-05 000.00145122
+-0.000169164 00-0.0014683 -3.93699e-06
+
+dv/dba1: 
+Analytical Jacobian is
+00000.303266 00.000634923 -0.000172808
+-0.000634006 00000.303265 00.000964279
+00.000175268 -0.000963526 00000.303266
+Numerical Jacobian is
+00000.303266 00.000634923 -0.000172808
+-0.000634006 00000.303265 00.000964279
+00.000175268 -0.000963526 00000.303266
+
+dp/dba1: 
+Analytical Jacobian is
+0000.0459856 06.57854e-05 04.64327e-06
+-6.57704e-05 0000.0459854 000.00011472
+-4.43591e-06 -0.000114714 0000.0459855
+Numerical Jacobian is
+0000.0459856 06.57854e-05 04.64327e-06
+-6.57704e-05 0000.0459854 000.00011472
+0-4.4359e-06 -0.000114714 0000.0459855
+
+dR/dR2: 
+Analytical Jacobian is
+000000000001 03.19119e-06 07.71192e-07
+-3.19119e-06 000000000001 -1.21329e-06
+-7.71195e-07 01.21329e-06 000000000001
+Numerical Jacobian is
+000000000001 03.19119e-06 07.71192e-07
+-3.19119e-06 000000000001 -1.21329e-06
+0-7.7119e-07 01.21314e-06 000000000001
+
+dp/dp2: 
+Analytical Jacobian is
+00-0.274282 0000.961646 -0.00239719
+00-0.961646 00-0.274274 00.00344076
+00.00265131 00.00324898 0000.999991
+Numerical Jacobian is
+00-0.274282 0000.961646 -0.00239719
+00-0.961646 00-0.274274 00.00344076
+00.00265131 00.00324898 0000.999991
+
+dv/dv2: 
+Analytical Jacobian is
+00-0.274282 0000.961646 -0.00239719
+00-0.961646 00-0.274274 00.00344076
+00.00265131 00.00324898 0000.999991
+Numerical Jacobian is
+00-0.274282 0000.961646 -0.00239719
+00-0.961646 00-0.274274 00.00344076
+000.0026513 00.00324898 0000.999991
+```

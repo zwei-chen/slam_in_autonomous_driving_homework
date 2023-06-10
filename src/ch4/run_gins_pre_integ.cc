@@ -2,16 +2,17 @@
 // Created by xiang on 2022/1/21.
 //
 
+#include <fstream>
+#include <iomanip>
+
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+
 #include "ch3/static_imu_init.h"
 #include "ch3/utm_convert.h"
 #include "ch4/gins_pre_integ.h"
 #include "common/io_utils.h"
 #include "tools/ui/pangolin_window.h"
-
-#include <gflags/gflags.h>
-#include <glog/logging.h>
-#include <fstream>
-#include <iomanip>
 
 /**
  * 运行由预积分构成的GINS系统
@@ -22,14 +23,17 @@ DEFINE_double(antenna_pox_x, -0.17, "RTK天线安装偏移X");
 DEFINE_double(antenna_pox_y, -0.20, "RTK天线安装偏移Y");
 DEFINE_bool(with_ui, true, "是否显示图形界面");
 DEFINE_bool(debug, false, "是否打印调试信息");
+DEFINE_bool(with_odom, false, "是否使用odom优化");
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
     google::InitGoogleLogging(argv[0]);
     FLAGS_stderrthreshold = google::INFO;
     FLAGS_colorlogtostderr = true;
     google::ParseCommandLineFlags(&argc, &argv, true);
 
-    if (fLS::FLAGS_txt_path.empty()) {
+    if (fLS::FLAGS_txt_path.empty())
+    {
         return -1;
     }
 
@@ -39,12 +43,16 @@ int main(int argc, char** argv) {
     sad::TxtIO io(fLS::FLAGS_txt_path);
     Vec2d antenna_pos(fLD::FLAGS_antenna_pox_x, fLD::FLAGS_antenna_pox_y);
 
-    auto save_vec3 = [](std::ofstream& fout, const Vec3d& v) { fout << v[0] << " " << v[1] << " " << v[2] << " "; };
-    auto save_quat = [](std::ofstream& fout, const Quatd& q) {
+    auto save_vec3 = [](std::ofstream& fout, const Vec3d& v)
+    { fout << v[0] << " " << v[1] << " " << v[2] << " "; };
+
+    auto save_quat = [](std::ofstream& fout, const Quatd& q)
+    {
         fout << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " ";
     };
 
-    auto save_result = [&save_vec3, &save_quat](std::ofstream& fout, const sad::NavStated& save_state) {
+    auto save_result = [&save_vec3, &save_quat](std::ofstream& fout, const sad::NavStated& save_state)
+    {
         fout << std::setprecision(18) << save_state.timestamp_ << " " << std::setprecision(9);
         save_vec3(fout, save_state.p_);
         save_quat(fout, save_state.R_.unit_quaternion());
@@ -65,13 +73,15 @@ int main(int argc, char** argv) {
     Vec3d origin = Vec3d::Zero();
 
     std::shared_ptr<sad::ui::PangolinWindow> ui = nullptr;
-    if (FLAGS_with_ui) {
+    if (FLAGS_with_ui)
+    {
         ui = std::make_shared<sad::ui::PangolinWindow>();
         ui->Init();
     }
 
     /// 设置各类回调函数
-    io.SetIMUProcessFunc([&](const sad::IMU& imu) {
+    io.SetIMUProcessFunc([&](const sad::IMU& imu)
+                         {
           /// IMU 处理函数
           if (!imu_init.InitSuccess()) {
               imu_init.AddIMU(imu);
@@ -103,9 +113,9 @@ int main(int argc, char** argv) {
           if (ui) {
               ui->UpdateNavState(state);
               usleep(5e2);
-          }
-      })
-        .SetGNSSProcessFunc([&](const sad::GNSS& gnss) {
+          } })
+        .SetGNSSProcessFunc([&](const sad::GNSS& gnss)
+                            {
             /// GNSS 处理函数
             if (!imu_inited) {
                 return;
@@ -123,7 +133,7 @@ int main(int argc, char** argv) {
             }
             gnss_convert.utm_pose_.translation() -= origin;
 
-            gins.AddGnss(gnss_convert);
+            gins.AddGnss(gnss_convert,FLAGS_with_odom);
 
             auto state = gins.GetState();
             save_result(fout, state);
@@ -131,21 +141,23 @@ int main(int argc, char** argv) {
                 ui->UpdateNavState(state);
                 usleep(1e3);
             }
-            gnss_inited = true;
-        })
-        .SetOdomProcessFunc([&](const sad::Odom& odom) {
+            gnss_inited = true; })
+        .SetOdomProcessFunc([&](const sad::Odom& odom)
+                            {
+
             imu_init.AddOdom(odom);
 
             if (imu_inited && gnss_inited) {
-                gins.AddOdom(odom);
-            }
-        })
+                gins.AddOdom(odom,FLAGS_with_odom);
+            } })
         .Go();
 
-    while (ui && !ui->ShouldQuit()) {
+    while (ui && !ui->ShouldQuit())
+    {
         usleep(1e5);
     }
-    if (ui) {
+    if (ui)
+    {
         ui->Quit();
     }
     return 0;

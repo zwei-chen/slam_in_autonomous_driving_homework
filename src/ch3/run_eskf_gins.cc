@@ -2,6 +2,7 @@
 // Created by xiang on 2021/11/11.
 //
 
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 
@@ -21,8 +22,7 @@ DEFINE_double(antenna_pox_y, -0.20, "RTK天线安装偏移Y");
 DEFINE_bool(with_ui, true, "是否显示图形界面");
 DEFINE_bool(with_odom, false, "是否加入轮速计信息");
 DEFINE_bool(with_F_update_error_state, true, "是否使用F矩阵进行更新误差状态");
-DEFINE_bool(with_left_perturbation,true,"是否使用左扰动更新");
-
+DEFINE_bool(with_left_perturbation, true, "是否使用左扰动更新");
 
 /**
  * 本程序演示使用RTK+IMU进行组合导航
@@ -143,7 +143,9 @@ int main(int argc, char** argv)
 
             // ! 5. RTK观测
             // 要求RTK heading有效，才能合入ESKF
+
             eskf.ObserveGps(gnss_convert);
+
 
             auto state = eskf.GetNominalState();
             if (ui) {

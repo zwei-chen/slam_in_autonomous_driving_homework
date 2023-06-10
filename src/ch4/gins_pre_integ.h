@@ -9,14 +9,15 @@
 #include <fstream>
 #include <memory>
 
+#include "ch4/imu_preintegration.h"
 #include "common/eigen_types.h"
 #include "common/gnss.h"
 #include "common/imu.h"
 #include "common/math_utils.h"
 #include "common/odom.h"
 
-#include "ch4/imu_preintegration.h"
-namespace sad {
+namespace sad
+{
 
 /**
  * 使用预积分优化的GINS
@@ -26,10 +27,12 @@ namespace sad {
  * 每次RTK到达时，触发一次优化，并做边缘化。边缘化结果写入下一帧先验中。
  * 里程计方面，使用最近时间的里程计信息作为速度观测量。
  */
-class GinsPreInteg {
-   public:
+class GinsPreInteg
+{
+  public:
     /// GINS 配置项
-    struct Options {
+    struct Options
+    {
         Options() {}
 
         Vec3d gravity_ = Vec3d(0, 0, -9.8);  // 重力方向
@@ -59,7 +62,8 @@ class GinsPreInteg {
     };
 
     /// Option 可以在构造时设置，也可以在后续设置
-    GinsPreInteg(Options options = Options()) : options_(options) { SetOptions(options_); }
+    GinsPreInteg(Options options = Options())
+        : options_(options) { SetOptions(options_); }
 
     /**
      * IMU 处理函数，要求初始零偏已经设置过，再调用此函数
@@ -71,13 +75,13 @@ class GinsPreInteg {
      * GNSS 处理函数
      * @param gnss
      */
-    void AddGnss(const GNSS& gnss);
+    void AddGnss(const GNSS& gnss, bool with_odom);
 
     /**
      * 轮速计处理函数
      * @param odom
      */
-    void AddOdom(const Odom& odom);
+    void AddOdom(const Odom& odom, bool with_odom);
 
     /// 设置gins的各种配置项，可以在构建时调用，也可以构造完成后，静止初始化结束时调用
     void SetOptions(Options options);
@@ -90,9 +94,18 @@ class GinsPreInteg {
      */
     NavStated GetState() const;
 
-   private:
+  private:
     // 优化
+    void Optimize(const int now_data_sign_);
     void Optimize();
+
+  private:
+    enum
+    {
+        imu_,
+        gnss_,
+        odom_
+    };
 
     Options options_;
     double current_time_ = 0.0;  // 当前时间
@@ -106,13 +119,15 @@ class GinsPreInteg {
     GNSS last_gnss_;
     GNSS this_gnss_;
 
-    IMU last_imu_;    // 上时刻IMU
+    IMU last_imu_;  // 上时刻IMU
+    Odom this_odom_;
     Odom last_odom_;  // 上时刻odom
     bool last_odom_set_ = false;
 
     /// 标志位
     bool first_gnss_received_ = false;  // 是否已收到第一个gnss信号
     bool first_imu_received_ = false;   // 是否已收到第一个imu信号
+    int last_data_sign_ = -1;
 };
 }  // namespace sad
 
